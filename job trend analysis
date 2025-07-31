@@ -1,0 +1,136 @@
+import time
+import random
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+
+def scrape_indeed_jobs(query, location, pages=1):
+    options = uc.ChromeOptions()
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
+    # options.add_argument('--headless=new')  # Optional: Enable for headless mode
+
+    driver = uc.Chrome(options=options)
+    job_list = []
+    base_url = "https://www.indeed.com"
+    search_url = f"{base_url}/jobs?q={query}&l={location}"
+
+    for page in range(pages):
+        driver.get(f"{search_url}&start={page * 10}")
+        time.sleep(3)
+
+        # CAPTCHA handling
+        if "captcha" in driver.page_source.lower() or "just a moment" in driver.title.lower():
+            print("CAPTCHA or Cloudflare interstitial detected.")
+            print("URL:", driver.current_url)
+            input("Solve CAPTCHA manually in browser and press Enter to continue...")
+            time.sleep(5)
+
+        # Scroll to bottom to trigger lazy loading
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+
+        # Wait for job cards
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.CLASS_NAME, 'job_seen_beacon'))
+            )
+        except Exception as e:
+            print("Jobs did not load.")
+            print("Title:", driver.title)
+            continue
+
+        # Save page snapshot for debugging
+        with open(f"debug_page_{page}.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        job_cards = soup.find_all('div', class_='job_seen_beacon')
+        print(f"[INFO] Found {len(job_cards)} job cards")
+
+        if len(job_cards) == 0:
+            print("Trying again after delay...")
+            time.sleep(5)
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            job_cards = soup.find_all('div', class_='job_seen_beacon')
+
+        for card in job_cards:
+            # Job title
+            title_elem = card.select_one('h2.jobTitle span')
+            title = title_elem['title'] if title_elem and title_elem.has_attr('title') else (title_elem.get_text(strip=True) if title_elem else 'N/A')
+
+            # Company
+            company_elem = card.find('span', class_='companyName')
+            company = company_elem.get_text(strip=True) if company_elem else 'N/A'
+
+            # Location
+            location_elem = card.find('div', class_='companyLocation')
+            location_text = location_elem.get_text(strip=True) if location_elem else 'N/A'
+
+            # Summary
+            summary_elem = card.find('div', class_='job-snippet')
+            summary = summary_elem.get_text(separator=' ', strip=True) if summary_elem else 'N/A'
+
+            job_list.append({
+                'Title': title,
+                'Company': company,
+                'Location': location_text,
+                'Summary': summary
+            })
+
+        time.sleep(random.randint(8, 12))  # anti-bot delay
+
+    driver.quit()
+    return pd.DataFrame(job_list) if job_list else pd.DataFrame(columns=['Title', 'Company', 'Location', 'Summary'])
+
+def analyze_and_visualize(df):
+    if df.empty:
+        print("No data scraped for analysis.")
+        return
+
+    print("\nTop Locations:")
+    print(df['Location'].value_counts().head(10))
+    print("\nTop Job Titles:")
+    print(df['Title'].value_counts().head(10))
+
+    plt.figure(figsize=(10, 6))
+    sns.countplot(y='Location', data=df, order=df['Location'].value_counts().iloc[:10].index,
+                  hue='Location', dodge=False, legend=False, palette='Blues_r')
+    plt.title('Top 10 Job Locations')
+    plt.xlabel('Number of Jobs')
+    plt.ylabel('Location')
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(10, 6))
+    sns.countplot(y='Title', data=df, order=df['Title'].value_counts().iloc[:10].index,
+                  hue='Title', dodge=False, legend=False, palette='Oranges_r')
+    plt.title('Top 10 Job Titles')
+    plt.xlabel('Number of Jobs')
+    plt.ylabel('Job Title')
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    query = input("Enter job title to search (e.g., web developer): ").strip()
+    location = input("Enter location to search (leave blank for all locations): ").strip()
+    print(f"Scraping job data for '{query}' in '{location}'...")
+    df = scrape_indeed_jobs(query.replace(' ', '+'), location.replace(' ', '+'), pages=1)
+
+    if not df.empty:
+        print(f"\nScraped {len(df)} job postings.")
+        df.to_csv('job_market_trends.csv', index=False)
+        print("Saved as 'job_market_trends.csv'")
+        analyze_and_visualize(df)
+    else:
+        print("\nNo data scraped.")
+
+if _name_ == "_main_":
+    main()
